@@ -1,6 +1,14 @@
 {
-  "global_keywords": ["black friday", "11.11"],
+  "global_keywords": [
+    "black friday",
+    "11.11"
+  ],
   "items": [
-    {"name": "mlay t14 pro", "min_price": null, "max_price": null, "exclude": []}
+    {
+      "name": "mlay t14 pro",
+      "min_price": null,
+      "max_price": null,
+      "exclude": []
+    }
   ]
 }
