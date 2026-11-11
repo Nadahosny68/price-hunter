@@ -6,19 +6,19 @@
   "items": [
     {
       "name": "mlay t14 pro",
-      "min_price": null,
+      "min_price": 9000.0,
       "max_price": null,
       "exclude": []
     },
     {
       "name": "MLAY T14",
-      "min_price": null,
+      "min_price": 9000.0,
       "max_price": null,
       "exclude": []
     },
     {
       "name": "IPL",
-      "min_price": null,
+      "min_price": 9000.0,
       "max_price": null,
       "exclude": []
     }
