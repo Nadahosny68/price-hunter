@@ -9,6 +9,18 @@
       "min_price": null,
       "max_price": null,
       "exclude": []
+    },
+    {
+      "name": "MLAY T14",
+      "min_price": null,
+      "max_price": null,
+      "exclude": []
+    },
+    {
+      "name": "IPL",
+      "min_price": null,
+      "max_price": null,
+      "exclude": []
     }
   ]
 }
