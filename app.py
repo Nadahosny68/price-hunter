@@ -49,11 +49,7 @@ with tab2:
         repo, token = st.secrets["GH_REPO"], st.secrets["GH_TOKEN"]
         url = f"https://api.github.com/repos/{repo}/contents/watchlist.json"
         H = {"Authorization": f"Bearer {token}"}
-        cur = requests.get(url, headers=H)
-if not cur.ok:
-    st.error(f"GitHub error {cur.status_code}. Check GH_TOKEN and GH_REPO.")
-    st.stop()
-cur = cur.json()
+        cur = requests.get(url, headers=H).json()
         data = json.loads(base64.b64decode(cur["content"]))
         txt = st.text_area("Watchlist (JSON)", json.dumps(data, indent=2, ensure_ascii=False), height=300)
         if st.button("Save watchlist", use_container_width=True):
