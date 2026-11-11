@@ -1,6 +1,20 @@
 {
-  "global_keywords": ["black friday", "11.11"],
+  "global_keywords": [
+    "black friday",
+    "11.11"
+  ],
   "items": [
-    {"name": "mlay t14 pro", "min_price": null, "max_price": null, "exclude": []}
+    {
+      "name": "penduline hair cream",
+      "min_price": null,
+      "max_price": 10000.0,
+      "exclude": []
+    },
+    {
+      "name": "Mlay t14 pro",
+      "min_price": null,
+      "max_price": 110.0,
+      "exclude": []
+    }
   ]
 }
