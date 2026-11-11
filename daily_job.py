@@ -23,16 +23,23 @@ def line(r):
 
 
 cfg = json.load(open("watchlist.json", encoding="utf-8"))
-items = [i["name"] for i in cfg["items"]]
-targets = {i["name"]: i.get("max_price") for i in cfg["items"]}
-found = search_many(items, cfg.get("global_keywords", []))
+specs = []
+for i in cfg["items"]:
+    ex = i.get("exclude", [])
+    ex = [e.strip() for e in ex.split(",")] if isinstance(ex, str) else ex
+    specs.append({"name": i["name"], "min_price": i.get("min_price"),
+                  "max_price": i.get("max_price"), "exclude": ex})
 
-for item, (rows, errs) in found.items():
+found = search_many(specs, cfg.get("global_keywords", []))
+for spec in specs:
+    res = found[spec["name"]]
+    rows, item = res["rows"], spec["name"]
     if not rows:
-        send(f"🔎 <b>{item}</b>\nNo results today." + (f"\n⚠️ {'; '.join(errs)}" if errs else ""))
+        why = "; ".join(res["errors"]) or "nothing matched"
+        send(f"🔎 <b>{item}</b>\nNo results today.\n⚠️ {why}")
         continue
     best = rows[0]
-    hit = targets.get(item) and best["price"] <= targets[item]
+    hit = spec["max_price"] and best["price"] <= spec["max_price"]
     head = ("🔥 UNDER YOUR TARGET — " if hit else "🏆 Best price — ") + f"<b>{item}</b>\n"
     send(head + line(best), best["image"])
     if len(rows) > 1:

@@ -1,7 +1,6 @@
 {
   "global_keywords": ["black friday", "11.11"],
   "items": [
-    {"name": "Samsung Galaxy S24", "max_price": 30000},
-    {"name": "Philips air fryer", "max_price": null}
+    {"name": "mlay t14 pro", "min_price": null, "max_price": null, "exclude": []}
   ]
 }
