@@ -33,10 +33,15 @@ for i in cfg["items"]:
 found = search_many(specs, cfg.get("global_keywords", []))
 for spec in specs:
     res = found[spec["name"]]
-    rows, item = res["rows"], spec["name"]
+    item = spec["name"]
+    rows = res["best"] or res["related"]
     if not rows:
-        why = "; ".join(res["errors"]) or "nothing matched"
-        send(f"🔎 <b>{item}</b>\nNo results today.\n⚠️ {why}")
+        msg = f"🔎 <b>{item}</b>\nNo priced results today."
+        if res["links"]:
+            msg += "\nPages to check:\n" + "\n".join(r["link"] for r in res["links"][:3])
+        if res["errors"]:
+            msg += "\n⚠️ " + "; ".join(res["errors"])[:300]
+        send(msg)
         continue
     best = rows[0]
     hit = spec["max_price"] and best["price"] <= spec["max_price"]

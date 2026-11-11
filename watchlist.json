@@ -1,26 +1,6 @@
 {
-  "global_keywords": [
-    "black friday",
-    "11.11"
-  ],
+  "global_keywords": ["black friday", "11.11"],
   "items": [
-    {
-      "name": "mlay t14 pro",
-      "min_price": 9000.0,
-      "max_price": null,
-      "exclude": []
-    },
-    {
-      "name": "MLAY T14",
-      "min_price": 9000.0,
-      "max_price": null,
-      "exclude": []
-    },
-    {
-      "name": "IPL",
-      "min_price": 9000.0,
-      "max_price": null,
-      "exclude": []
-    }
+    {"name": "mlay t14 pro", "min_price": null, "max_price": null, "exclude": []}
   ]
 }

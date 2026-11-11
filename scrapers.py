@@ -1,24 +1,25 @@
-"""Price Hunter v2 - Jumia, Amazon.eg, Noon, Google Shopping (brand sites), with smart filtering."""
-import json, os, re, statistics
+"""Price Hunter v3 - Google-style fuzzy price search.
+Main engine: Google Shopping via Serper.dev (reliable). Bonus: direct Jumia / Amazon.eg / Noon."""
+import json, os, re, statistics, time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote_plus
+from difflib import SequenceMatcher
+from urllib.parse import quote_plus, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-}
-
-# Words that usually mean "accessory, not the product itself"
+UAS = [
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
 ACCESSORY_WORDS = {
     "case", "cases", "cover", "covers", "protector", "protectors", "tempered", "skin", "holder",
     "stand", "pouch", "sleeve", "film", "sticker", "stickers", "strap", "straps", "charger",
     "cable", "adapter", "جراب", "كفر", "غطاء", "حماية", "اسكرينة", "سكرينة", "شاحن", "كابل", "استيك",
 }
 BUNDLE_WORDS = {"with", "including", "free", "plus", "and", "+", "w/", "مع"}
+SHOP_DOMAINS = ("noon.com", "amazon.eg", "jumia.com.eg")
 
 
 def _num(text):
@@ -26,36 +27,100 @@ def _num(text):
     return float(m.group().replace(",", "")) if m else None
 
 
-def _row(store, title, price, link, image="", currency="EGP"):
-    return {"store": store, "title": (title or "").strip(), "price": price,
-            "currency": currency, "link": link, "image": image or "", "tag": "", "src": ""}
+def _row(store, title, price, link, image="", note=""):
+    return {"store": store, "title": (title or "").strip(), "price": price, "currency": "EGP",
+            "link": link, "image": image or "", "tag": "", "src": "", "note": note, "score": 0.0}
 
 
-# ---------------------------------------------------------------- sources
+def _get(url, timeout=12, tries=3):
+    """Fetch with retries and different browser identities (shops randomly block servers)."""
+    last = None
+    for n in range(tries):
+        try:
+            r = requests.get(url, timeout=timeout, headers={
+                "User-Agent": UAS[n % len(UAS)], "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+                "Accept": "text/html,application/xhtml+xml"})
+            if r.status_code == 200 and len(r.text) > 5000 and "captcha" not in r.text[:20000].lower():
+                return r
+            last = f"HTTP {r.status_code} / challenge page"
+        except Exception as e:
+            last = type(e).__name__
+        time.sleep(1)
+    raise RuntimeError(f"blocked ({last})")
+
+
+# ------------------------------------------------------------ Google-based engines (reliable)
+def _serper(endpoint, q):
+    key = os.getenv("SERPER_API_KEY")
+    if not key:
+        raise RuntimeError("SERPER_API_KEY is missing")
+    r = requests.post(f"https://google.serper.dev/{endpoint}", timeout=25,
+                      headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                      json={"q": q, "gl": "eg", "hl": "en"})
+    if r.status_code in (401, 403):
+        raise RuntimeError("Serper key rejected")
+    r.raise_for_status()
+    return r.json()
+
+
+def google_shopping(q):
+    if os.getenv("SERPER_API_KEY"):
+        data = _serper("shopping", q)
+        return [_row(s.get("source", "Web"), s.get("title"), _num(s.get("price")), s.get("link"),
+                     s.get("imageUrl"))
+                for s in data.get("shopping", []) if s.get("link")]
+    key = os.getenv("SERPAPI_KEY")           # fallback engine
+    if not key:
+        raise RuntimeError("no Serper/SerpAPI key")
+    d = requests.get("https://serpapi.com/search.json", timeout=25, params={
+        "engine": "google_shopping", "q": q, "gl": "eg", "hl": "en",
+        "google_domain": "google.com.eg", "api_key": key}).json()
+    if d.get("error") and "hasn't returned any results" not in d["error"]:
+        raise RuntimeError(d["error"][:100])
+    return [_row(s.get("source", "Web"), s.get("title"), s.get("extracted_price"),
+                 s.get("product_link") or s.get("link"), s.get("thumbnail"))
+            for s in d.get("shopping_results", []) if s.get("product_link") or s.get("link")]
+
+
+def google_web(q):
+    """Google results from Noon / Amazon.eg / Jumia pages (price taken from the snippet when shown)."""
+    data = _serper("search", f"{q} (site:noon.com OR site:amazon.eg OR site:jumia.com.eg)")
+    out = []
+    for o in data.get("organic", []):
+        link, host = o.get("link", ""), urlparse(o.get("link", "")).netloc
+        store = next((d for d in SHOP_DOMAINS if d in host), None)
+        if not store:
+            continue
+        text = f"{o.get('title','')} {o.get('snippet','')}"
+        m = re.search(r"(?:EGP|E£|LE|جنيه|ج\.م)\s?([\d,]+(?:\.\d+)?)|([\d,]+(?:\.\d+)?)\s?(?:EGP|E£|جنيه|ج\.م)", text)
+        price = _num(m.group(1) or m.group(2)) if m else None
+        out.append(_row(store, o.get("title"), price, link, "", "price from search snippet" if price else ""))
+    return out
+
+
+# ------------------------------------------------------------ direct shop scrapers (bonus, may be blocked)
 def jumia(q):
-    r = requests.get(f"https://www.jumia.com.eg/catalog/?q={quote_plus(q)}", headers=HEADERS, timeout=15)
-    soup, out = BeautifulSoup(r.text, "html.parser"), []
+    soup = BeautifulSoup(_get(f"https://www.jumia.com.eg/catalog/?q={quote_plus(q)}").text, "html.parser")
+    out = []
     for a in soup.select("article.prd"):
         link, name, prc, img = a.select_one("a.core"), a.select_one(".name"), a.select_one(".prc"), a.select_one("img")
         if link and name and prc:
-            out.append(_row("Jumia", name.text, _num(prc.text),
-                            "https://www.jumia.com.eg" + link.get("href", ""),
+            out.append(_row("Jumia", name.text, _num(prc.text), "https://www.jumia.com.eg" + link.get("href", ""),
                             (img.get("data-src") or img.get("src")) if img else ""))
     return out
 
 
 def amazon(q):
-    r = requests.get(f"https://www.amazon.eg/s?k={quote_plus(q)}", headers=HEADERS, timeout=15)
-    if "captcha" in r.text.lower():
-        raise RuntimeError("blocked by captcha")
-    soup, out = BeautifulSoup(r.text, "html.parser"), []
-    for c in soup.select('div[data-component-type="s-search-result"]'):
+    soup = BeautifulSoup(_get(f"https://www.amazon.eg/s?k={quote_plus(q)}").text, "html.parser")
+    out = []
+    for c in soup.select("div[data-asin]"):
+        if not c.get("data-asin"):
+            continue
         t, p = c.select_one("h2"), c.select_one("span.a-price span.a-offscreen")
         a, img = c.select_one("h2 a") or c.select_one("a.a-link-normal"), c.select_one("img.s-image")
         if t and p and a:
             out.append(_row("Amazon.eg", t.text, _num(p.text),
-                            "https://www.amazon.eg" + a.get("href", "").split("?")[0],
-                            img.get("src") if img else ""))
+                            "https://www.amazon.eg" + a.get("href", "").split("?")[0], img.get("src") if img else ""))
     return out
 
 
@@ -70,137 +135,138 @@ def _walk(o):
 
 
 def noon(q):
-    r = requests.get(f"https://www.noon.com/egypt-en/search/?q={quote_plus(q)}", headers=HEADERS, timeout=8)
+    r = _get(f"https://www.noon.com/egypt-en/search/?q={quote_plus(q)}", timeout=8, tries=2)
     m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
     if not m:
         raise RuntimeError("blocked or page changed")
     out, seen = [], set()
     for d in _walk(json.loads(m.group(1))):
         if d.get("name") and d.get("sku") and d.get("url") and (d.get("sale_price") or d.get("price")):
-            if d["sku"] in seen:
-                continue
-            seen.add(d["sku"])
-            img = f"https://f.nooncdn.com/p/{d['image_key']}.jpg" if d.get("image_key") else ""
-            out.append(_row("Noon", d["name"], _num(d.get("sale_price") or d.get("price")),
-                            f"https://www.noon.com/egypt-en/{d['url']}/{d['sku']}/p/", img))
+            if d["sku"] not in seen:
+                seen.add(d["sku"])
+                img = f"https://f.nooncdn.com/p/{d['image_key']}.jpg" if d.get("image_key") else ""
+                out.append(_row("Noon", d["name"], _num(d.get("sale_price") or d.get("price")),
+                                f"https://www.noon.com/egypt-en/{d['url']}/{d['sku']}/p/", img))
     return out
 
 
-def google_shopping(q):
-    """Brand sites + Egyptian shops (often includes Noon/Amazon listings). Needs SERPAPI_KEY."""
-    key = os.getenv("SERPAPI_KEY")
-    if not key:
-        raise RuntimeError("SERPAPI_KEY is missing")
-    # tell Google to skip accessories
-    negatives = [f"-{w}" for w in ("case", "cover", "protector") if w not in q.lower()]
-    r = requests.get("https://serpapi.com/search.json", timeout=25, params={
-        "engine": "google_shopping", "q": " ".join([q] + negatives), "gl": "eg", "hl": "en",
-        "google_domain": "google.com.eg", "api_key": key})
-    data = r.json()
-    if data.get("error") and "hasn't returned any results" not in data["error"]:
-        raise RuntimeError(data["error"])
-    out = []
-    for s in data.get("shopping_results", []):
-        link = s.get("product_link") or s.get("link")
-        price = s.get("extracted_price")
-        if link and price:
-            out.append(_row(s.get("source", "Web"), s.get("title"), float(price), link, s.get("thumbnail")))
-    return out
+SOURCES = {
+    "Google Shopping": google_shopping,
+    "Google links (Noon/Amazon/Jumia pages)": google_web,
+    "Jumia (direct)": jumia,
+    "Amazon.eg (direct)": amazon,
+    "Noon (direct, usually blocked)": noon,
+}
+DEFAULT_SOURCES = ["Google Shopping", "Google links (Noon/Amazon/Jumia pages)", "Jumia (direct)", "Amazon.eg (direct)"]
 
 
-SOURCES = {"Jumia": jumia, "Amazon.eg": amazon, "Google Shopping": google_shopping, "Noon (often blocked)": noon}
-DEFAULT_SOURCES = ["Jumia", "Amazon.eg", "Google Shopping"]
+# ------------------------------------------------------------ fuzzy relevance
+def _toks(s):
+    return [t for t in re.findall(r"[\w]+", s.lower()) if len(t) > 1]
 
 
-# ---------------------------------------------------------------- filtering
-def _tokens(s):
-    return re.findall(r"[\w+/]+", s.lower())
+def _sim(a, b):
+    if a == b:
+        return 1.0
+    if len(a) >= 3 and (b.startswith(a) or a.startswith(b)):
+        return 0.9
+    r = SequenceMatcher(None, a, b).ratio()
+    return r if r >= 0.75 else 0.0
 
 
-def _matches_item(item, title):
-    """Every number/model token must match; plus at least 60% of all words."""
-    words = [w for w in re.findall(r"\w+", item.lower()) if len(w) > 1]
-    t = title.lower()
-    if not words:
-        return True
-    hits = 0
-    for w in words:
-        pat = rf"\b{re.escape(w)}\b" if w.isdigit() else rf"\b{re.escape(w)}"
-        found = re.search(pat, t) is not None
-        if any(c.isdigit() for c in w) and not found:
-            return False                      # model numbers must match
-        hits += found
-    return hits / len(words) >= 0.6
+def relevance(item, title):
+    q, t = _toks(item), _toks(title)
+    if not q or not t:
+        return 0.0
+    return sum(max(_sim(w, x) for x in t) for w in q) / len(q)
 
 
-def _is_accessory(item, title):
-    q = set(_tokens(item))
-    toks = _tokens(title)
-    for i, w in enumerate(toks):
-        if w in ACCESSORY_WORDS and w not in q:
-            prev = toks[i - 1] if i else ""
-            if prev not in BUNDLE_WORDS:      # "with charger" is fine
-                return True
-    return False
+def is_accessory(item, title):
+    qset, toks = set(_toks(item)), re.findall(r"[\w+/]+", title.lower())
+    return any(w in ACCESSORY_WORDS and w not in qset and (toks[i - 1] if i else "") not in BUNDLE_WORDS
+               for i, w in enumerate(toks))
 
 
-def filter_rows(spec, rows):
+def variants(item, wide=True):
+    vs = [item]
+    if wide:
+        swap = {"malay": "mlay", "mlay": "malay"}
+        words = item.split()
+        vs.append(" ".join(swap.get(w.lower(), w) for w in words))
+        if len(words) > 2:
+            vs.append(" ".join(words[:-1]))
+    seen, out = set(), []
+    for v in vs:
+        if v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+    return out[:3]
+
+
+def classify(spec, rows):
+    """Nothing is thrown away silently: rows go to best / related / links / other."""
     item = spec["name"]
-    excl = [e.strip().lower() for e in spec.get("exclude", []) if e.strip()]
+    excl = [e.strip().lower() for e in spec.get("exclude", []) if e and e.strip()]
     mn = spec.get("min_price") or 0
-    keep = []
+    best, related, links, other = [], [], [], []
     for r in rows:
+        r["score"] = relevance(item, r["title"])
         t = r["title"].lower()
-        if not r["price"] or r["price"] < mn:
+        if r["score"] < 0.35 or any(e in t for e in excl):
             continue
-        if not _matches_item(item, r["title"]) or _is_accessory(item, r["title"]):
+        if r["price"] is None:
+            links.append(r)
+        elif r["price"] < mn:
             continue
-        if any(e in t for e in excl):
-            continue
-        keep.append(r)
-    # price sanity: drop anything far below the typical price (usually accessories / fakes)
-    if not mn and len(keep) >= 4:
-        med = statistics.median(r["price"] for r in keep)
-        keep = [r for r in keep if r["price"] >= 0.3 * med]
-    return keep
+        elif is_accessory(item, r["title"]):
+            other.append(r)
+        elif r["score"] >= 0.7:
+            best.append(r)
+        else:
+            related.append(r)
+    pool = best + related
+    if not mn and len(pool) >= 4:                # far-too-cheap items are probably accessories
+        med = statistics.median(r["price"] for r in pool)
+        low = [r for r in pool if r["price"] < 0.3 * med]
+        best = [r for r in best if r not in low]
+        related = [r for r in related if r not in low]
+        other += low
+    key = lambda r: r["price"]
+    return sorted(best, key=key), sorted(related, key=key), links, sorted(other, key=key)
 
 
-# ---------------------------------------------------------------- search
-def search_item(spec, keywords=(), sources=None, top=5):
-    """spec: {"name","min_price","max_price","exclude"}. Returns {"rows","errors","stats"}."""
+# ------------------------------------------------------------ search
+def search_item(spec, keywords=(), sources=None, top=6, wide=True):
     sources = sources or DEFAULT_SOURCES
-    item = spec["name"]
-    queries = [(item, "")] + [(f"{item} {k}", k) for k in keywords if k.strip()]
-    jobs = [(s, q, tag) for s in sources for q, tag in queries]
+    qs = [(v, "") for v in variants(spec["name"], wide)]
+    qs += [(f"{spec['name']} {k}", k) for k in keywords if k.strip()]
+    jobs = [(s, q, tag) for s in sources for q, tag in qs]
     errors, stats = [], {s: {"found": 0, "kept": 0} for s in sources}
 
     def run(job):
         s, q, tag = job
         try:
-            rows = SOURCES[s](q)
-            return [dict(r, tag=tag, src=s) for r in rows]
+            return [dict(r, tag=tag, src=s) for r in SOURCES[s](q)]
         except Exception as e:
-            errors.append(f"{s}: {str(e)[:120]}")
+            errors.append(f"{s}: {str(e)[:110]}")
             return []
 
-    allrows = []
     with ThreadPoolExecutor(8) as ex:
-        for rows in ex.map(run, jobs):
-            allrows += rows
+        allrows = [r for rows in ex.map(run, jobs) for r in rows]
+    uniq = {}
     for r in allrows:
         stats[r["src"]]["found"] += 1
-    unique = {}
-    for r in filter_rows(spec, allrows):
-        old = unique.get(r["link"])
-        if not old or (r["tag"] and not old["tag"]):
-            unique[r["link"]] = r
-    ranked = sorted(unique.values(), key=lambda r: r["price"])
-    for r in ranked:
+        old = uniq.get(r["link"])
+        if not old or (r["tag"] and not old["tag"]) or (old["price"] is None and r["price"]):
+            uniq[r["link"]] = r
+    best, related, links, other = classify(spec, list(uniq.values()))
+    for r in best + related:
         stats[r["src"]]["kept"] += 1
-    return {"rows": ranked[:top], "errors": sorted(set(errors)), "stats": stats}
+    return {"best": best[:top], "related": related[:top], "links": links[:top], "other": other[:top],
+            "errors": sorted(set(errors)), "stats": stats}
 
 
-def search_many(specs, keywords=(), sources=None, top=5):
+def search_many(specs, keywords=(), sources=None, top=6, wide=True):
     with ThreadPoolExecutor(3) as ex:
-        outs = list(ex.map(lambda s: search_item(s, keywords, sources, top), specs))
+        outs = list(ex.map(lambda s: search_item(s, keywords, sources, top, wide), specs))
     return {s["name"]: o for s, o in zip(specs, outs)}
